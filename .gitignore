@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+
+appsettings.json
+appsettings.*.json
+!appsettings.example.json
+
+run.log
+run.err.log
+*.user
+*.suo
+

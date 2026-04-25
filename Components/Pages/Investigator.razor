@@ -1,0 +1,237 @@
+@page "/"
+@rendermode InteractiveServer
+@using SplunkInvestigator.Models
+@using SplunkInvestigator.Services
+@using Markdig
+@inject AgentService Agent
+@inject LogFileService LogService
+
+<PageTitle>Splunk Investigator Agent</PageTitle>
+
+<div class="app-shell">
+    <!-- ── SIDEBAR ── -->
+    <aside class="sidebar">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <div>
+                <div class="logo-title">Splunk</div>
+                <div class="logo-sub">Investigator Agent</div>
+            </div>
+        </div>
+
+        <div class="sidebar-section">
+            <div class="section-label">Quick Queries</div>
+            @foreach (var q in _quickQueries)
+            {
+                <button class="quick-btn" @onclick="() => UseQuickQuery(q.Query)">
+                    <span class="qicon">@q.Icon</span>
+                    @q.Label
+                </button>
+            }
+        </div>
+
+        <div class="sidebar-section">
+            <div class="section-label">Log Status</div>
+            <div class="stats-badge">@_logStats</div>
+        </div>
+
+        <div class="sidebar-section">
+            <button class="clear-btn" @onclick="ClearConversation">
+                🗑 Clear Conversation
+            </button>
+            <button class="clear-btn" @onclick="ReloadLogs" style="margin-top:6px">
+                🔄 Reload Log Files
+            </button>
+        </div>
+    </aside>
+
+    <!-- ── MAIN CHAT ── -->
+    <main class="main-panel">
+        <div class="chat-header">
+            <div class="header-title">Payment Log Investigation</div>
+            <div class="header-sub">Powered by Azure OpenAI · Microsoft.Extensions.AI · .NET 10</div>
+        </div>
+
+        <div class="chat-area" @ref="_chatContainer">
+            @if (_messages.Count == 0)
+            {
+                <div class="empty-state">
+                    <div class="empty-icon">🔍</div>
+                    <div class="empty-title">Ready to Investigate</div>
+                    <div class="empty-text">
+                        Ask about a transaction (e.g. <em>Investigate TXN-98765</em>),
+                        run a query, or check for errors across the payments index.
+                    </div>
+                </div>
+            }
+
+            @foreach (var msg in _messages)
+            {
+                <div class="message @msg.Role @(msg.IsToolCall ? "tool-msg" : "")">
+                    @if (msg.IsToolCall)
+                    {
+                        <div class="tool-badge">🔧 @msg.ToolName</div>
+                    }
+                    else
+                    {
+                        <div class="msg-avatar">@(msg.Role == "user" ? "👤" : "🤖")</div>
+                        <div class="msg-bubble">
+                            <div class="msg-content">
+                                @if (msg.Role == "assistant")
+                                {
+                                    @((MarkupString)RenderMarkdown(msg.Content))
+                                }
+                                else
+                                {
+                                    @msg.Content
+                                }
+                            </div>
+                            <div class="msg-time">@msg.Timestamp.ToString("HH:mm:ss")</div>
+                        </div>
+                    }
+                </div>
+            }
+
+            @if (_isStreaming)
+            {
+                <div class="message assistant">
+                    <div class="msg-avatar">🤖</div>
+                    <div class="msg-bubble">
+                        <div class="msg-content streaming-content">
+                            @if (!string.IsNullOrEmpty(_streamingBuffer))
+                            {
+                                @((MarkupString)RenderMarkdown(_streamingBuffer))
+                            }
+                            else
+                            {
+                                <span class="thinking">
+                                    <span class="dot">●</span><span class="dot">●</span><span class="dot">●</span>
+                                    <em>@_statusMessage</em>
+                                </span>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+
+        <!-- ── INPUT BAR ── -->
+        <div class="input-area">
+            <textarea
+                class="input-box"
+                placeholder="Investigate TXN-98765 · Show all errors · What happened with transaction TXN-11223?"
+                @bind="_userInput"
+                @bind:event="oninput"
+                @onkeydown="HandleKeyDown"
+                rows="2"
+                disabled="@_isStreaming" />
+            <button class="send-btn"
+                    @onclick="SendMessage"
+                    disabled="@(_isStreaming || string.IsNullOrWhiteSpace(_userInput))">
+                @(_isStreaming ? "⏳" : "▶")
+            </button>
+        </div>
+    </main>
+</div>
+
+@code {
+    private List<ChatMessage> _messages = [];
+    private string _userInput = string.Empty;
+    private bool _isStreaming = false;
+    private string _streamingBuffer = string.Empty;
+    private string _statusMessage = "Thinking...";
+    private string _logStats = "Loading...";
+    private ElementReference _chatContainer;
+
+    private record QuickQuery(string Icon, string Label, string Query);
+    private readonly List<QuickQuery> _quickQueries =
+    [
+        new("🔍", "Investigate TXN-98765", "Investigate transaction TXN-98765 and give me a full report"),
+        new("🚨", "Show all errors", "Show me all error events in the payments index"),
+        new("🛑", "Fraud events", "Find any fraud detection events in the payments logs"),
+        new("📊", "Log statistics", "Give me an overview of the current log statistics"),
+        new("✅", "Completed payments", "Show all successfully completed payment transactions"),
+    ];
+
+    protected override async Task OnInitializedAsync()
+    {
+        _logStats = await LogService.GetLogStatisticsAsync();
+    }
+
+    private async Task SendMessage()
+    {
+        if (string.IsNullOrWhiteSpace(_userInput) || _isStreaming) return;
+
+        var query = _userInput.Trim();
+        _userInput = string.Empty;
+        _isStreaming = true;
+        _streamingBuffer = string.Empty;
+        _statusMessage = "Searching logs...";
+
+        _messages.Add(new ChatMessage { Role = "user", Content = query });
+        StateHasChanged();
+
+        try
+        {
+            await foreach (var chunk in Agent.InvestigateStreamAsync(query, _messages))
+            {
+                _streamingBuffer += chunk;
+                _statusMessage = "Generating report...";
+                StateHasChanged();
+                await Task.Delay(5); // yield for UI update
+            }
+
+            // Commit the streamed response
+            _messages.Add(new ChatMessage
+            {
+                Role = "assistant",
+                Content = _streamingBuffer
+            });
+        }
+        catch (Exception ex)
+        {
+            _messages.Add(new ChatMessage
+            {
+                Role = "assistant",
+                Content = $"⚠️ Error: {ex.Message}"
+            });
+        }
+        finally
+        {
+            _streamingBuffer = string.Empty;
+            _isStreaming = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !e.ShiftKey)
+            await SendMessage();
+    }
+
+    private void UseQuickQuery(string query)
+    {
+        _userInput = query;
+        StateHasChanged();
+    }
+
+    private void ClearConversation()
+    {
+        _messages.Clear();
+        _streamingBuffer = string.Empty;
+    }
+
+    private async Task ReloadLogs()
+    {
+        LogService.InvalidateCache();
+        _logStats = await LogService.GetLogStatisticsAsync();
+        StateHasChanged();
+    }
+
+    private static string RenderMarkdown(string md)
+    {
+        var pipeline = new MarkdownPipelineBuilder().UseAdvancedExtensions().Build();
+        return Markdown.ToHtml(md, pipeline);
+    }
+}
